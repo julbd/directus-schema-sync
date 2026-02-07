@@ -1,4 +1,22 @@
-# Version 3.0.8
+# Version 3.2.0
+
+  - **Updated** packages for Directus 11.14
+
+## Version 3.1.2
+
+  - **Updated** Default `directus_config.js` with sorting for consistent exports
+  - **Fixed** Build to exclude external `@directus/api` libs causing module not found error in docker container
+
+## Version 3.1.1
+
+  - **Fixed** Snapshot undefined issue
+
+## Version 3.1.0
+
+  - **Updated** Packages and build.
+  - **Added** More logging for schema import
+
+## Version 3.0.8
 
   - **Fixed** Slight performance improvement when importing data.
 

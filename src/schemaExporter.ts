@@ -1,7 +1,7 @@
 import type { Snapshot, SnapshotField, SnapshotRelation } from '@directus/api/dist/types';
 import type { ApiExtensionContext } from '@directus/extensions';
-import { Collection } from '@directus/types';
-import { readFile, writeFile, mkdir, rm } from 'fs/promises';
+import type { Collection, ExtensionsServices } from '@directus/types';
+import { mkdir, readFile, rm, writeFile } from 'fs/promises';
 import { glob } from 'glob';
 import { condenseAction } from './condenseAction.js';
 import { exportHook } from './schemaExporterHooks.js';
@@ -12,12 +12,11 @@ import { fileExists } from './utils.js';
 export class SchemaExporter implements IExporter {
 	protected _exportMeta: ExportMeta;
 	protected _filePath: string;
-	protected _getSchemaService: () => any;
 	protected _exportHandler = condenseAction(() => this.createAndSaveSnapshot());
 
 	// Directus SchemaService, database and getSchema
 	constructor(
-		getSchemaService: () => any,
+		protected getSchemaService: () => Promise<InstanceType<ExtensionsServices['SchemaService']>>,
 		protected logger: ApiExtensionContext['logger'],
 		protected options = {
 			path: undefined,
@@ -27,7 +26,6 @@ export class SchemaExporter implements IExporter {
 			split?: boolean
 		}
 	) {
-		this._getSchemaService = () => getSchemaService();
 		this._exportMeta = new ExportMeta(options.path);
 		this._filePath = `${this._exportMeta.dataDir}/schema.json`;
 	}
@@ -56,7 +54,7 @@ export class SchemaExporter implements IExporter {
 	 * Import the schema from file to the database
 	 */
 	public load = async () => {
-		const svc = this._getSchemaService();
+		const svc = await this.getSchemaService();
 		let json;
 		try {
 			json = await readFile(this._filePath, { encoding: 'utf8' });
@@ -119,12 +117,16 @@ export class SchemaExporter implements IExporter {
 			const currentSnapshot = await svc.snapshot();
 			const currentHash = svc.getHashedSnapshot(currentSnapshot).hash;
 			if (currentHash === hash) {
-				this.logger.debug('Schema is already up-to-date');
+				this.logger.info('Schema is already up-to-date');
 				return;
 			}
+
+			this.logger.info(`Diffing schema with hash: ${currentHash} and hash: ${hash}`);
 			const diff = await svc.diff(snapshot, { currentSnapshot, force: true });
 			if (diff !== null) {
+				this.logger.info(`Applying schema diff...`);
 				await svc.apply({ diff, hash: currentHash });
+				this.logger.info(`Schema updated`);
 			}
 		}
 	};
@@ -133,7 +135,7 @@ export class SchemaExporter implements IExporter {
 	 * Create and save the schema snapshot to file
 	 */
 	protected createAndSaveSnapshot = async () => {
-		const svc = this._getSchemaService();
+		const svc = await this.getSchemaService();
 		let snapshot = (await svc.snapshot()) as Snapshot;
 		snapshot = exportHook(snapshot);
 		let hash = svc.getHashedSnapshot(snapshot).hash;

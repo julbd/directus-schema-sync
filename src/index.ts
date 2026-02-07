@@ -1,4 +1,4 @@
-import { getFlowManager } from '@directus/api/flows';
+import { useBus } from '@directus/api/bus/index';
 import type { HookConfig } from '@directus/extensions';
 import type { SchemaOverview } from '@directus/types';
 import { condenseAction } from './condenseAction';
@@ -6,7 +6,7 @@ import { copyConfig } from './copyConfig';
 import { ExportManager } from './exportManager';
 import { ExportMeta } from './exportMeta.js';
 import { SchemaExporter } from './schemaExporter';
-import type { ExportCollectionConfig, IGetItemsService, ItemsService } from './types';
+import type { ExportCollectionConfig, IGetItemsService, IItemsService } from './types';
 import { UpdateManager } from './updateManager';
 import { ADMIN_ACCOUNTABILITY, nodeImport } from './utils';
 
@@ -23,8 +23,9 @@ const registerHook: HookConfig = async ({ action, init }, { env, services, datab
 		schema ||
 		(schema = await getSchema({ database }));
 	const clearAdminSchema = () => (schema = null);
-	const getSchemaService = () =>
+	const getSchemaService = async () =>
 		new SchemaService({
+			schema: await getAdminSchema(),
 			knex: database,
 			accountability: ADMIN_ACCOUNTABILITY,
 		});
@@ -33,7 +34,7 @@ const registerHook: HookConfig = async ({ action, init }, { env, services, datab
 			schema: await getAdminSchema(),
 			accountability: ADMIN_ACCOUNTABILITY,
 			knex: database,
-		}) as ItemsService;
+		}) as IItemsService;
 
 	const updateManager = new UpdateManager(database);
 
@@ -101,8 +102,10 @@ const registerHook: HookConfig = async ({ action, init }, { env, services, datab
 	}
 
 	async function reloadDirectusModules() {
-		const flowManager = getFlowManager();
-		await flowManager.reload();
+		const messenger = useBus();
+		if (!messenger) return;
+
+		messenger.publish('flows', { type: 'reload' });
 	}
 
 	// LOAD EXPORTED SCHEMAS & COLLECTIONS
@@ -119,7 +122,7 @@ const registerHook: HookConfig = async ({ action, init }, { env, services, datab
 
 				await updateManager.commitUpdates();
 				clearAdminSchema();
-				reloadDirectusModules();
+				await reloadDirectusModules();
 			} catch (e) {
 				logger.error(e);
 				logger.info('Releasing lock...');
@@ -133,6 +136,10 @@ const registerHook: HookConfig = async ({ action, init }, { env, services, datab
 	}
 
 	init('cli.before', async ({ program }) => {
+		if (program.commands.some(cmd => cmd.name() === 'schema-sync')) {
+			logger.info('Already registered "schema-sync" command');
+			return;
+		}
 		const dbCommand = program.command('schema-sync');
 
 		dbCommand

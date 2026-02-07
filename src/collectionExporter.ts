@@ -1,11 +1,11 @@
-import { Item, PrimaryKey, Query } from '@directus/types';
 import type { ApiExtensionContext } from '@directus/extensions';
+import type { Item, PrimaryKey, Query } from '@directus/types';
 import { mkdir, readFile, rm, writeFile } from 'fs/promises';
+import { glob } from 'glob';
 import { condenseAction } from './condenseAction.js';
-import type { CollectionExporterOptions, IExporter, IGetItemsService, ItemsService, ToUpdateItemDiff } from './types';
+import type { CollectionExporterOptions, IExporter, IGetItemsService, IItemsService, ToUpdateItemDiff } from './types';
 import { ExportMeta } from './exportMeta.js';
 import { getDiff, sortObject, fileExists } from './utils.js';
-import { glob } from 'glob';
 
 type PARTIAL_CONFIG = { count: number; groupedBy: string[]; partial: true };
 
@@ -18,7 +18,7 @@ const DEFAULT_COLLECTION_EXPORTER_OPTIONS: CollectionExporterOptions = {
 };
 
 class CollectionExporter implements IExporter {
-	protected _getService: () => Promise<ItemsService>;
+	protected _getService: () => Promise<IItemsService>;
 	protected _exportMeta: ExportMeta;
 	protected collection: string;
 
@@ -41,7 +41,7 @@ class CollectionExporter implements IExporter {
 			...otherOpts,
 		};
 
-		let srv: ItemsService;
+		let srv: IItemsService;
 		this._getService = async () => srv || (srv = await getItemsService(collectionName));
 
 		this.collection = collectionName;
@@ -211,14 +211,12 @@ class CollectionExporter implements IExporter {
 
 		// If groupBy is set, group the json by the specified fields
 		if (this.options.groupBy?.length) {
-			const groupedItems = items.reduce((map, item) => {
+			return items.reduce((map, item) => {
 				const key = this.itemGroupFilename(item);
-				if (!map[key]) map[key] = [];
+				map[key] ||= [];
 				map[key].push(item);
 				return map;
 			}, {} as Record<string, Array<Item>>);
-
-			return groupedItems;
 		}
 
 		return items;
