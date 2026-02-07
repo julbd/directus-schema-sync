@@ -1,5 +1,9 @@
 # Schema Sync for Directus
 
+### Changes in this fork :
+* Add SCHEMA_SYNC_PATH environment variable allowing to specify/customize the path to schema-sync. By default : (Directus root)/schema-sync
+
+
 The better way to sync your Directus schema, **configuration** and selected **data** between environments.
 
 Splits the schema file into multiple files once per collection, for easier management in git and working with the schema files in general.
