@@ -4,7 +4,7 @@ import { mkdir, readFile, rm, writeFile } from 'fs/promises';
 import { glob } from 'glob';
 import { condenseAction } from './condenseAction.js';
 import type { CollectionExporterOptions, IExporter, IGetItemsService, IItemsService, ToUpdateItemDiff } from './types';
-import { ExportMeta } from './exportMeta.js';
+import { MetaExporter } from './metaExporter.js';
 import { getDiff, sortObject, fileExists } from './utils.js';
 
 type PARTIAL_CONFIG = { count: number; groupedBy: string[]; partial: true };
@@ -15,11 +15,13 @@ const DEFAULT_COLLECTION_EXPORTER_OPTIONS: CollectionExporterOptions = {
 	query: {
 		limit: -1,
 	},
+	emitEvents: true,
 };
 
 class CollectionExporter implements IExporter {
+	protected _itemsService?: IItemsService;
 	protected _getService: () => Promise<IItemsService>;
-	protected _exportMeta: ExportMeta;
+	protected _exportMeta: MetaExporter;
 	protected collection: string;
 
 	protected options: CollectionExporterOptions;
@@ -34,6 +36,7 @@ class CollectionExporter implements IExporter {
 		const { query, ...otherOpts } = options ?? {};
 		this.options = {
 			excludeFields: [],
+			emitEvents: true,
 			query: {
 				limit: -1,
 				...query,
@@ -41,12 +44,11 @@ class CollectionExporter implements IExporter {
 			...otherOpts,
 		};
 
-		let srv: IItemsService;
-		this._getService = async () => srv || (srv = await getItemsService(collectionName));
+		this._getService = async () => this._itemsService || (this._itemsService = await getItemsService(collectionName));
 
 		this.collection = collectionName;
 
-		this._exportMeta = new ExportMeta(options.path);
+		this._exportMeta = new MetaExporter(options.path);
 		const fileName = this.options.prefix ? `${this.options.prefix}_${collectionName}` : collectionName;
 		this.filePath = `${this._exportMeta.dataDir}/${fileName}.json`;
 	}
@@ -79,6 +81,12 @@ class CollectionExporter implements IExporter {
 
 	get name() {
 		return this.collection;
+	}
+
+	/** Clear cached schema-dependent state after the DB schema has changed. */
+	public clearCache() {
+		this._itemsService = undefined;
+		this._settings = null;
 	}
 
 	protected _persistQueue = condenseAction(() => this.exportCollectionToFile());
@@ -308,6 +316,11 @@ class CollectionExporter implements IExporter {
 
 		const itemsSvc = await this._getService();
 		const { getKey, getPrimary, queryWithPrimary } = await this.settings();
+		const mutationOpts = {
+			emitEvents: this.options.emitEvents !== false,
+			// Caches are flushed once after the whole import instead of after every item
+			autoPurgeCache: false,
+		};
 
 		const items = await itemsSvc.readByQuery(queryWithPrimary);
 
@@ -329,7 +342,7 @@ class CollectionExporter implements IExporter {
 		// Delete duplicates first
 		if (duplicatesToDelete.length > 0) {
 			this.logger.debug(`Deleting ${duplicatesToDelete.length} duplicate ${this.collection} items`);
-			await itemsSvc.deleteMany(duplicatesToDelete);
+			await itemsSvc.deleteMany(duplicatesToDelete, mutationOpts);
 		}
 
 		const toUpdate = new Map<PrimaryKey, ToUpdateItemDiff>();
@@ -369,10 +382,10 @@ class CollectionExporter implements IExporter {
 			this.logger.debug(`Inserting ${toInsertValues.length} x ${this.collection} items`);
 			if (await this.sortbyIfLinked(toInsertValues)) {
 				for (const item of toInsertValues) {
-					await itemsSvc.createOne(item);
+					await itemsSvc.createOne(item, mutationOpts);
 				}
 			} else {
-				await itemsSvc.createMany(toInsertValues);
+				await itemsSvc.createMany(toInsertValues, mutationOpts);
 			}
 		}
 
@@ -380,7 +393,7 @@ class CollectionExporter implements IExporter {
 		if (toUpdate.size > 0) {
 			this.logger.debug(`Updating ${toUpdate.size} x ${this.collection} items`);
 			for (const [_key, item] of toUpdate) {
-				await itemsSvc.updateOne(item.pkey, item.diff);
+				await itemsSvc.updateOne(item.pkey, item.diff, mutationOpts);
 			}
 		}
 
@@ -390,7 +403,7 @@ class CollectionExporter implements IExporter {
 				const toDelete = Array.from(toDeleteItems.values(), getPrimary);
 				if (toDelete.length > 0) {
 					this.logger.debug(`Deleting ${toDelete.length} x ${this.collection} items`);
-					await itemsSvc.deleteMany(toDelete);
+					await itemsSvc.deleteMany(toDelete, mutationOpts);
 				}
 			}
 		};

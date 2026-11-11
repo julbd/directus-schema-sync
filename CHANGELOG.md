@@ -1,4 +1,34 @@
-# Version 3.2.0
+# Version 4.2.0
+
+  - **Added** `SCHEMA_SYNC=LAZY_IMPORT`, which imports in the background once the server is listening instead of delaying start-up. **The schema and data may be outdated for the first requests**, see [Lazy import](README.md#lazy-import).
+  - **Fixed** Imported permissions, policies, roles, settings etc. could stay cached. After an import, Directus' caches are now flushed and other instances notified (via Redis), also after `npx directus schema-sync import`.
+  - **Added** `npx directus schema-sync hash` also recalculates the schema hash in `schema.json`, for when the schema files were edited by hand.
+  - **Added** `--force` / `-f` on `import` and `import-schema` to diff and apply the schema even when it seems up-to-date ([#126](https://github.com/bcc-code/directus-schema-sync/issues/126)).
+  - **Changed** The schema hash ignores the order of collections/fields/relations and the Directus version, so the schema files and the database hash the same when their schema is the same. Run `schema-sync hash` or export once after upgrading, until then imports log that the hash is outdated (harmless, the schema is diffed as before).
+  - **Fixed** Import no longer trusts the hash stored in `schema.json`: it hashes the schema files, so hand edits with an outdated hash are no longer skipped as "already up-to-date".
+  - **Fixed** Postgres: the "schema is already up-to-date" shortcut never matched (the export hook was not applied to the current snapshot before hashing), so every import diffed the full schema.
+  - **Fixed** `mv_ts` is now written as an absolute timestamp. Before, a database session time zone other than UTC shifted it, which could skip a newer export.
+  - **Fixed** `install` now waits for the export to finish before hashing the files.
+  - **Fixed** A trailing newline in `hash.txt` is ignored.
+  - **Improved** When nothing changed, the start-up check is a single read instead of a row-locking transaction.
+  - **Improved** Import no longer clears the data cache after every imported item (with `CACHE_AUTO_PURGE`), caches are flushed once at the end.
+  - **Improved** Logs a warning when the `mv_*` columns are missing (every start then re-imports everything), and how long an import took.
+
+# Version 4.0.1
+
+  - **Added** Per-collection `emitEvents` option (default `true`) to control whether Directus emits events on import mutations.
+
+# Version 4.0.0
+
+  - **Breaking** Requires Directus 12 (`host: ^12.0.0`). Use version 3.* for Directus 11.
+  - **Fixed** Initialize license entitlements before schema/data import (same approach as [directus#27869](https://github.com/directus/directus/pull/27869)), so CLI and startup sync respect `LICENSE_KEY` / `LICENSE_TOKEN` limits instead of Core defaults.
+
+## Version 3.3.1
+
+  - **Updated & Fixed** For Directus 11.17
+  - **Added** `SCHEMA_SYNC_SAFE` - (optional) Safe mode for schema import. Filters destructive diff operations (deletes), so project-specific collections/fields/relations are not removed.
+
+## Version 3.2.0
 
   - **Updated** packages for Directus 11.14
 

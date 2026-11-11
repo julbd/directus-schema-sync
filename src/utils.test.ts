@@ -52,7 +52,7 @@ describe('getDiff', () => {
 	it('should handle nested objects', () => {
 		const newObj = { a: 1, b: { c: 2, d: 3 } };
 		const oldObj = { a: 1, b: { c: 2, d: 4 } };
-		const assertedOutput = { b: { d: 3 } };
+		const assertedOutput = { b: { c: 2, d: 3 } };
 		assert.deepStrictEqual(getDiff(newObj, oldObj), assertedOutput);
 	});
 

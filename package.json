@@ -2,7 +2,7 @@
 	"name": "directus-extension-schema-sync",
 	"description": "Sync schema and data between Directus instances",
 	"icon": "sync_alt",
-	"version": "3.2.0",
+	"version": "4.2.0",
 	"repository": {
 		"type": "git",
 		"url": "https://github.com/bcc-code/directus-schema-sync.git"
@@ -19,7 +19,7 @@
 		"type": "hook",
 		"path": "dist/index.js",
 		"source": "src/index.ts",
-		"host": "^11.0.0"
+		"host": "^12.0.0"
 	},
 	"files": [
 		"dist",
@@ -31,23 +31,25 @@
 		"dev": "directus-extension build -w --no-minify",
 		"link": "directus-extension link",
 		"pre-test": "tsc -p tsconfig.test.json",
-		"test": "npm run pre-test && node --test dist-test/",
+		"test": "npm run pre-test && node --test 'dist-test/**/*.test.js'",
 		"create-version": "node ./scripts/version.cjs",
 		"release-channel": "node ./scripts/release-channel.js"
 	},
 	"devDependencies": {
-		"@directus/extensions": "^3.0.16",
-		"@directus/extensions-sdk": "^17.0.5",
-		"@directus/types": "^14.0.0",
+		"@directus/extensions": "^4.0.0",
+		"@directus/extensions-sdk": "^18.1.0",
+		"@directus/types": "^18.1.0",
 		"@types/keyv": "^4.2.0",
 		"@types/node": "^25.0.10",
 		"rollup-plugin-exclude-dependencies-from-bundle": "^1.1.24",
-		"typescript": "^5.8.2"
+		"typescript": "^5.9.3"
 	},
 	"dependencies": {
 		"glob": "^10.4.5"
 	},
 	"peerDependencies": {
-		"@directus/api": "^33.0.0"
+		"@directus/api": ">=36.0.0",
+		"keyv": "^4.2.0",
+		"knex": "^3.1.0"
 	}
 }

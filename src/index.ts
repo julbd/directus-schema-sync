@@ -1,14 +1,16 @@
 import { useBus } from '@directus/api/bus/index';
+import { flushCaches } from '@directus/api/cache';
 import type { HookConfig } from '@directus/extensions';
 import type { SchemaOverview } from '@directus/types';
 import { condenseAction } from './condenseAction';
 import { copyConfig } from './copyConfig';
 import { ExportManager } from './exportManager';
-import { ExportMeta } from './exportMeta.js';
+import { runImport } from './importRunner';
+import { MetaExporter } from './metaExporter.js';
 import { SchemaExporter } from './schemaExporter';
 import type { ExportCollectionConfig, IGetItemsService, IItemsService } from './types';
 import { UpdateManager } from './updateManager';
-import { ADMIN_ACCOUNTABILITY, nodeImport } from './utils';
+import { ADMIN_ACCOUNTABILITY, ensureLicenseInitialized, nodeImport } from './utils';
 
 const registerHook: HookConfig = async ({ action, init }, { env, services, database, getSchema, logger }) => {
 	const { SchemaService, ItemsService } = services;
@@ -16,6 +18,7 @@ const registerHook: HookConfig = async ({ action, init }, { env, services, datab
 	const schemaExportOptions = {
 		path: env.SCHEMA_SYNC_PATH,
 		split: typeof env.SCHEMA_SYNC_SPLIT === 'boolean' ? env.SCHEMA_SYNC_SPLIT : true,
+		safe: !!env.SCHEMA_SYNC_SAFE,
 	};
 
 	let schema: SchemaOverview | null;
@@ -40,10 +43,10 @@ const registerHook: HookConfig = async ({ action, init }, { env, services, datab
 
 	// We need to do this in async in order to load the config files
 	let _exportManager: ExportManager;
-	const exportMeta = new ExportMeta(env.SCHEMA_SYNC_PATH);
+	const metaExporter = new MetaExporter(env.SCHEMA_SYNC_PATH);
 
 	const createExportManager = async (dataOnly = false) => {
-		const exportMng = new ExportManager(env.SCHEMA_SYNC_PATH, logger);
+		const exportMng = new ExportManager(env.SCHEMA_SYNC_PATH, logger, clearAdminSchema);
 
 		if (!dataOnly) {
 			exportMng.addExporter({
@@ -52,10 +55,10 @@ const registerHook: HookConfig = async ({ action, init }, { env, services, datab
 			});
 		}
 
-		const { syncDirectusCollections } = (await nodeImport(exportMeta.schemaDir, 'directus_config.js')) as {
+		const { syncDirectusCollections } = (await nodeImport(metaExporter.schemaDir, 'directus_config.js')) as {
 			syncDirectusCollections: ExportCollectionConfig;
 		};
-		const { syncCustomCollections } = (await nodeImport(exportMeta.schemaDir, 'config.js')) as {
+		const { syncCustomCollections } = (await nodeImport(metaExporter.schemaDir, 'config.js')) as {
 			syncCustomCollections: ExportCollectionConfig;
 		};
 		exportMng.addCollectionExporter(syncDirectusCollections, getItemsService);
@@ -63,7 +66,7 @@ const registerHook: HookConfig = async ({ action, init }, { env, services, datab
 
 		// Additional config
 		if (env.SCHEMA_SYNC_CONFIG) {
-			const { syncCustomCollections } = (await nodeImport(exportMeta.schemaDir, env.SCHEMA_SYNC_CONFIG)) as {
+			const { syncCustomCollections } = (await nodeImport(metaExporter.schemaDir, env.SCHEMA_SYNC_CONFIG)) as {
 				syncCustomCollections: ExportCollectionConfig;
 			};
 			if (syncCustomCollections) {
@@ -89,9 +92,12 @@ const registerHook: HookConfig = async ({ action, init }, { env, services, datab
 	};
 
 	const updateMeta = condenseAction(async (saveToDb = true) => {
-		const meta = await exportMeta.updateExportMeta();
-		if (saveToDb && meta && (await updateManager.lockForUpdates(meta.hash, meta.ts))) {
-			await updateManager.commitUpdates();
+		const meta = await metaExporter.updateExportMeta();
+		if (saveToDb && meta) {
+			const lock = await updateManager.lockForUpdates(meta.hash, meta.ts);
+			if (lock.success) {
+				await updateManager.commitUpdates();
+			}
 		}
 	});
 
@@ -101,36 +107,48 @@ const registerHook: HookConfig = async ({ action, init }, { env, services, datab
 		}
 	}
 
-	async function reloadDirectusModules() {
-		const messenger = useBus();
-		if (!messenger) return;
-
-		messenger.publish('flows', { type: 'reload' });
+	/**
+	 * Make this and all other instances pick up the imported schema/data.
+	 * The data import uses plain ItemsServices, which (unlike e.g. PermissionsService)
+	 * don't clear the system/permission caches, so we do it once here.
+	 */
+	async function notifyChanged() {
+		clearAdminSchema();
+		// Clears caches here and publishes `schemaChanged`, the shared (Redis) caches cover the other instances
+		await flushCaches();
+		// Every instance subscribed to the bus reloads its flows
+		await useBus()?.publish('flows', { type: 'reload' });
 	}
+
+	const importFromFiles = () =>
+		runImport(
+			{
+				logger,
+				updateManager,
+				getExportMeta: () => metaExporter.getExportMeta(),
+				load: async () => {
+					const expMng = await exportManager();
+					await expMng.loadAll(!!env.SCHEMA_SYNC_MERGE);
+				},
+				notifyChanged,
+			},
+			env.SCHEMA_SYNC
+		);
 
 	// LOAD EXPORTED SCHEMAS & COLLECTIONS
 	if (env.SCHEMA_SYNC === 'BOTH' || env.SCHEMA_SYNC === 'IMPORT') {
+		// Blocks start-up until the import is done, so the first request sees the new schema
 		init('app.before', async () => {
 			try {
-				const meta = await exportMeta.getExportMeta();
-				if (!meta) return logger.info('Nothing exported yet it seems');
-				if (!(await updateManager.lockForUpdates(meta.hash, meta.ts))) return; // Schema is locked / no change, nothing to do
-
-				logger.info(`Updating schema and data with hash: ${meta.hash}`);
-				const expMng = await exportManager();
-				await expMng.loadAll(!!env.SCHEMA_SYNC_MERGE);
-
-				await updateManager.commitUpdates();
-				clearAdminSchema();
-				await reloadDirectusModules();
-			} catch (e) {
-				logger.error(e);
-				logger.info('Releasing lock...');
-				await updateManager.releaseLock();
+				await importFromFiles();
 			} finally {
-				await attachExporters();
+				attachExporters();
 			}
 		});
+	} else if (env.SCHEMA_SYNC === 'LAZY_IMPORT') {
+		// Runs once the server is listening, requests are served from the old schema/data until it's done
+		logger.info('Schema sync (LAZY_IMPORT): import will run in the background once the server has started');
+		action('server.start', () => importFromFiles());
 	} else {
 		attachExporters();
 	}
@@ -164,13 +182,16 @@ const registerHook: HookConfig = async ({ action, init }, { env, services, datab
 		dbCommand
 			.command('import-schema')
 			.description('Import only the schema file')
-			.action(async () => {
+			.option('-f, --force', 'Diff and apply the schema even when it seems up-to-date')
+			.action(async ({ force }: { force?: boolean }) => {
 				logger.info('Importing schema...');
-				const meta = await exportMeta.getExportMeta();
+				const meta = await metaExporter.getExportMeta();
 				if (!meta) return logger.info('Nothing exported yet it seems');
 
+				// CLI does not start the full app, so load entitlements before schema apply
+				await ensureLicenseInitialized();
 				const exportSchema = new SchemaExporter(getSchemaService, logger, schemaExportOptions);
-				await exportSchema.load();
+				await exportSchema.load(false, force);
 
 				await updateManager.forceCommitUpdates(meta.hash, meta.ts);
 				logger.info('Done!');
@@ -185,7 +206,8 @@ const registerHook: HookConfig = async ({ action, init }, { env, services, datab
 				logger.info('Installing Schema sync...');
 				await updateManager.ensureInstalled();
 				await copyConfig(force, { logger });
-				(await exportManager()).exportAll();
+				// Must finish writing the files before they are hashed
+				await (await exportManager()).exportAll();
 				await updateMeta();
 
 				logger.info('Done!');
@@ -194,11 +216,22 @@ const registerHook: HookConfig = async ({ action, init }, { env, services, datab
 
 		dbCommand
 			.command('hash')
-			.description('Recalculate the hash for all the data files')
+			.description('Recalculate the schema hash in schema.json and the hash for all the data files, eg. after editing them by hand')
 			.action(async () => {
-				await updateMeta(false);
-				logger.info('Done!');
-				process.exit(0);
+				try {
+					// First, since schema.json is one of the data files hashed below
+					const schemaExporter = new SchemaExporter(getSchemaService, logger, schemaOptions);
+					if (await schemaExporter.updateHash()) {
+						logger.info('Updated schema hash in schema.json');
+					}
+
+					await updateMeta(false);
+					logger.info('Done!');
+					process.exit(0);
+				} catch (err: any) {
+					logger.error(err);
+					process.exit(1);
+				}
 			});
 
 		dbCommand
@@ -206,11 +239,19 @@ const registerHook: HookConfig = async ({ action, init }, { env, services, datab
 			.description('Import the schema and all available data from file to DB.')
 			.option('--merge', 'Only upsert data and not delete')
 			.option('--data', 'Only import data and not schema')
-			.action(async ({ merge, data }: { merge: boolean; data: boolean }) => {
+			.option('-f, --force', 'Diff and apply the schema even when it seems up-to-date')
+			.action(async ({ merge, data, force }: { merge: boolean; data: boolean; force?: boolean }) => {
 				try {
-					logger.info(`Importing everything from: ${exportMeta.dataDir}`);
+					logger.info(`Importing everything from: ${metaExporter.dataDir}`);
+					// CLI does not start the full app, so load entitlements before mutations
+					await ensureLicenseInitialized();
 					const expMng = await exportManager(data);
-					await expMng.loadAll(merge);
+					try {
+						await expMng.loadAll(merge, force);
+					} finally {
+						// Partial imports may already have committed changes.
+						await flushCaches();
+					}
 
 					logger.info('Done!');
 					process.exit(0);
@@ -225,7 +266,7 @@ const registerHook: HookConfig = async ({ action, init }, { env, services, datab
 			.description('Export the schema and all data as configured from DB to file')
 			.action(async () => {
 				try {
-					logger.info(`Exporting everything to: ${exportMeta.dataDir}`);
+					logger.info(`Exporting everything to: ${metaExporter.dataDir}`);
 					const expMng = await exportManager();
 					await expMng.exportAll();
 

@@ -1,14 +1,17 @@
 import type { ApiExtensionContext } from '@directus/extensions';
 import type { ActionHandler } from '@directus/types';
 import { CollectionExporter } from './collectionExporter.js';
-import { ExportCollectionConfig, IExporterConfig, IGetItemsService } from './types';
+import type { ExportCollectionConfig, IExporterConfig, IGetItemsService } from './types';
 
 export class ExportManager {
 	protected exporters: IExporterConfig[] = [];
 
 	constructor(
+		
 		protected path: string,
-		protected logger: ApiExtensionContext['logger']
+		protected logger: ApiExtensionContext['logger'],
+		protected clearSchemaCache?: () => void
+	
 	) {	}
 
 	// FIRST: Add exporters
@@ -30,16 +33,26 @@ export class ExportManager {
 	}
 
 	// SECOND: Import if needed
-	public async loadAll(merge = false) {
-		await this._loadNextExporter(0, merge);
+	public async loadAll(merge = false, force = false) {
+		await this._loadNextExporter(0, merge, force);
 	}
 
-	protected async _loadNextExporter(i = 0, merge = false) {
+	protected refreshSchemaCache() {
+		this.clearSchemaCache?.();
+		for (const { exporter } of this.exporters) {
+			exporter.clearCache?.();
+		}
+	}
+
+	protected async _loadNextExporter(i = 0, merge = false, force = false) {
 		if (i >= this.exporters.length) return;
 
 		try {
-			const finishUp = await this.exporters[i]!.exporter.load(merge);
-			await this._loadNextExporter(i + 1, merge);
+			const finishUp = await this.exporters[i]!.exporter.load(merge, force);
+			if (this.exporters[i]!.exporter.name === 'schema') {
+				this.refreshSchemaCache();
+			}
+			await this._loadNextExporter(i + 1, merge, force);
 			if (typeof finishUp === 'function') await finishUp();
 		} catch (e) {
 			this.logger.error(`Failed loading "${this.exporters[i]!.exporter.name}".`);

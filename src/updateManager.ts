@@ -1,11 +1,119 @@
 import type { Knex } from 'knex';
 
+export type LockSuccessReason = 'acquired' | 'not_installed';
+export type LockSkipReason =
+	| 'already_locking'
+	| 'already_locked'
+	| 'row_missing'
+	| 'row_locked'
+	| 'hash_unchanged'
+	| 'ts_not_newer';
+
+export type LockResult =
+	| { success: true; reason: LockSuccessReason }
+	| { success: false; reason: LockSkipReason; detail?: string };
+
+export type SettingsSyncRow = {
+	mv_locked: boolean;
+	mv_hash: string;
+	// SQLite returns epoch millis for values written as Date
+	mv_ts: string | Date | number | null;
+};
+
+/**
+ * Decide whether a settings row is eligible for schema-sync updates.
+ * Pure helper so skip reasons can be unit-tested without a database.
+ */
+export function evaluateLockEligibility(
+	row: SettingsSyncRow | null | undefined,
+	newHash: string,
+	isoTS: string
+): LockResult {
+	if (!row) {
+		return { success: false, reason: 'row_missing' };
+	}
+
+	if (row.mv_locked) {
+		return { success: false, reason: 'row_locked' };
+	}
+
+	if (row.mv_hash === newHash) {
+		return {
+			success: false,
+			reason: 'hash_unchanged',
+			detail: `db hash already ${row.mv_hash}`,
+		};
+	}
+
+	if (row.mv_ts != null) {
+		const dbTs = toUtcMillis(row.mv_ts);
+		const fileTs = toUtcMillis(isoTS);
+		if (!(dbTs < fileTs)) {
+			return {
+				success: false,
+				reason: 'ts_not_newer',
+				detail: `file ts ${isoTS} is not newer than db ts ${formatTs(row.mv_ts)}`,
+			};
+		}
+	}
+
+	return { success: true, reason: 'acquired' };
+}
+
+function formatTs(value: string | Date | number): string {
+	if (value instanceof Date) return value.toISOString();
+	if (typeof value === 'number') return new Date(value).toISOString();
+	return String(value);
+}
+
+/** Parse hash.txt-style timestamps (`YYYY-MM-DD HH:mm:ss`), Date values and epoch millis as UTC. */
+function toUtcMillis(value: string | Date | number): number {
+	if (value instanceof Date) return value.getTime();
+	if (typeof value === 'number') return value;
+	const raw = String(value).trim();
+	if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(raw)) {
+		return new Date(raw.replace(' ', 'T') + 'Z').getTime();
+	}
+	return new Date(raw).getTime();
+}
+
+/**
+ * Convert a hash.txt timestamp to an absolute instant for `mv_ts`.
+ * Writing the raw string lets the DB interpret it in its session time zone,
+ * which shifts the stored value whenever that zone is not UTC.
+ */
+export function toDbTimestamp(isoTS: string): Date {
+	return new Date(toUtcMillis(isoTS));
+}
+
+export function describeLockResult(result: LockResult): string {
+	switch (result.reason) {
+		case 'acquired':
+			return 'lock acquired';
+		case 'not_installed':
+			return 'schema-sync columns not installed yet; proceeding without lock';
+		case 'already_locking':
+			return 'lock attempt already in progress in this process';
+		case 'already_locked':
+			return 'this process already holds the schema-sync lock';
+		case 'row_missing':
+			return 'directus_settings row not found';
+		case 'row_locked':
+			return 'locked by another process (mv_locked=true)';
+		case 'hash_unchanged':
+			return `hash already applied${result.detail ? ` (${result.detail})` : ''}`;
+		case 'ts_not_newer':
+			return `export timestamp is not newer than DB${result.detail ? ` (${result.detail})` : ''}`;
+	}
+}
+
 export class UpdateManager {
 	protected db: Knex;
 	protected tableName = 'directus_settings';
 	protected rowId = 1;
 
 	protected _locking = false;
+	protected _installed = false;
 	protected _locked:
 		| {
 				hash: string;
@@ -21,33 +129,43 @@ export class UpdateManager {
 	 * Acquire the lock to make updates
 	 * @param newHash - New hash value of latest changes
 	 * @param isoTS - ISO timestamp
-	 * @returns
 	 */
-	public async lockForUpdates(newHash: string, isoTS: string) {
-		if (this._locked || this._locking) return false;
+	public async lockForUpdates(newHash: string, isoTS: string): Promise<LockResult> {
+		if (this._locked) return { success: false, reason: 'already_locked' };
+		if (this._locking) return { success: false, reason: 'already_locking' };
 		this._locking = true;
 
-		// Don't lock if schema sync is not installed yet
-		const isInstalled = await this.db.schema.hasColumn(this.tableName, 'mv_hash');
-		if (!isInstalled) {
-			this._locking = false;
-			return true;
-		}
+		try {
+			// Don't lock if schema sync is not installed yet
+			if (!this._installed) {
+				this._installed = await this.db.schema.hasColumn(this.tableName, 'mv_hash');
+				if (!this._installed) {
+					return { success: true, reason: 'not_installed' };
+				}
+			}
 
-		const succeeded = await this.db.transaction(async trx => {
-			const rows = await trx(this.tableName)
-				.select('*')
+			// Cheap read first: on most starts nothing changed, so skip the row-locking transaction
+			const current = await this.db(this.tableName)
+				.select('mv_locked', 'mv_hash', 'mv_ts')
 				.where('id', this.rowId)
-				.where('mv_locked', false)
-				// Only need to migrate if hash is different
-				.andWhereNot('mv_hash', newHash)
-				// And only if the previous hash is older than the current one
-				.andWhere('mv_ts', '<', isoTS)
-				.orWhereNull('mv_ts')
-				.forUpdate(); // This locks the row
+				.first();
+			const precheck = evaluateLockEligibility(current as SettingsSyncRow | undefined, newHash, isoTS);
+			if (!precheck.success) {
+				return precheck;
+			}
 
-			// If row is found, lock it
-			if (rows.length) {
+			// Re-check under a row lock, another instance may have taken it since the read above
+			return await this.db.transaction(async trx => {
+				const rows = await trx(this.tableName)
+					.select('mv_locked', 'mv_hash', 'mv_ts')
+					.where('id', this.rowId)
+					.forUpdate();
+
+				const eligibility = evaluateLockEligibility(rows[0] as SettingsSyncRow | undefined, newHash, isoTS);
+				if (!eligibility.success) {
+					return eligibility;
+				}
+
 				await trx(this.tableName).where('id', this.rowId).update({
 					mv_locked: true,
 				});
@@ -55,14 +173,11 @@ export class UpdateManager {
 					hash: newHash,
 					ts: isoTS,
 				};
-				return true;
-			}
-
-			return false;
-		});
-
-		this._locking = false;
-		return succeeded;
+				return { success: true, reason: 'acquired' } as const;
+			});
+		} finally {
+			this._locking = false;
+		}
 	}
 
 	public async commitUpdates() {
@@ -70,7 +185,7 @@ export class UpdateManager {
 
 		await this.db(this.tableName).where('id', this.rowId).update({
 			mv_hash: this._locked.hash,
-			mv_ts: this._locked.ts,
+			mv_ts: toDbTimestamp(this._locked.ts),
 			mv_locked: false,
 		});
 
@@ -81,7 +196,7 @@ export class UpdateManager {
 	public async forceCommitUpdates(newHash: string, isoTS: string) {
 		await this.db(this.tableName).where('id', this.rowId).update({
 			mv_hash: newHash,
-			mv_ts: isoTS,
+			mv_ts: toDbTimestamp(isoTS),
 			mv_locked: false,
 		});
 
@@ -100,7 +215,6 @@ export class UpdateManager {
 		return true;
 	}
 
-
 	public async ensureInstalled() {
 		const tableName = 'directus_settings';
 
@@ -112,6 +226,7 @@ export class UpdateManager {
 				table.timestamp('mv_ts', { useTz: true }).defaultTo('2020-01-01').notNullable();
 				table.boolean('mv_locked').defaultTo(false).notNullable();
 			});
+			this._installed = true;
 			return true;
 		}
 		return false;

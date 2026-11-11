@@ -8,8 +8,10 @@ export type IGetItemsService = (collectionName: string) => Promise<IItemsService
 
 export interface IExporter {
 	name: string;
-	load: (merge?: boolean) => Promise<(() => Promise<void>) | null | void>;
+	/** @param force Import even when it seems up-to-date */
+	load: (merge?: boolean, force?: boolean) => Promise<(() => Promise<void>) | null | void>;
 	export: () => Promise<void>;
+	clearCache?: () => void;
 }
 
 export interface IExporterConfig {
@@ -46,6 +48,10 @@ export type CollectionExporterOptions = {
 
 	// Prefix to add to the exported file name
 	prefix?: string;
+
+	// Whether Directus should emit events for mutations during import (default true)
+	emitEvents?: boolean;
+
 	onExport?: (item: Item, srv: IItemsService) => Promise<Item | null>;
 	onImport?: (item: Item, srv: IItemsService) => Promise<Item | null>;
 };
@@ -60,6 +66,7 @@ export type ToUpdateItemDiff = {
 //
 export type MutationOptions = {
 	emitEvents?: boolean;
+	autoPurgeCache?: boolean;
 };
 export interface IItemsService extends AbstractService<Item> {
 	collection: string;
